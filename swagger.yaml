@@ -1,0 +1,1559 @@
+openapi: 3.0.0
+info:
+  title: Autofill API
+  description: |
+    **Autofill** — REST API for logistics and commercial documents: OCR (Google Vision / server pipeline),
+    template-driven field extraction (LLM), and optional line-items table extraction (`columns` + `rows` + structured `line_items`).
+
+    ## Quick start (no self-hosted backend)
+
+    Runnable examples live in [**twelvedevs/autofill-examples**](https://github.com/twelvedevs/autofill-examples).
+    Subscribe on [RapidAPI](https://rapidapi.com/12devs-12devs-default/api/autofill), copy **`X-RapidAPI-Key`** and **`X-RapidAPI-Host`**
+    from the **Endpoints** tab into the example `.env`, then follow the README in the folder you choose (~5 minutes to the first extracted fields).
+
+    | Example | Path | Stack |
+    |---------|------|-------|
+    | **React Try It** | [`examples/react-tryit`](https://github.com/twelvedevs/autofill-examples/tree/main/examples/react-tryit) | Vite + React — upload a sample PDF, **Auto** or **Manual** preset, view fields as a table + JSON |
+    | **Python Quickstart** | [`examples/python-quickstart`](https://github.com/twelvedevs/autofill-examples/tree/main/examples/python-quickstart) | Jupyter notebook (**Run All**) or `python try_autofill.py` — same two-step API flow, optional pandas table |
+
+    Env mapping (same gateway, different prefixes): `VITE_RAPIDAPI_*` (React) ↔ `RAPIDAPI_*` (Python). Use the **Base URL** from your Hub cURL as `…_BASE_URL` (no trailing slash).
+
+    **Typical JSON flow:** `POST /upload` → `POST /recognize` with `filePath` and optional `fields` / `mode`.
+
+    **Single request with file:** `POST /recognize/file` (multipart) or `POST /extract-table/file` for table-only extraction.
+
+    **CMR consignment notes:** `POST /cmr` or `POST /cmr/file` — dedicated Gemini pipeline for CMR forms (sender, consignee, receipt confirmation, stamps/signatures). No template `fields` list; response is structured JSON in `cmr`. Server-side OCR is skipped (file sent directly to the vision model).
+
+    **Environments:** the first server is the RapidAPI Hub (`X-RapidAPI-*` headers); the second is a direct origin call.
+
+    Errors are returned in JSON (see `ErrorResponse`). Heavy routes may return `429` when rate limits are exceeded.
+
+  version: 1.0.0
+  contact:
+    name: Twelve Devs
+    url: https://twelvedevs.com/products/ai-document-to-form-automation-engine
+
+externalDocs:
+  description: Quick-start examples (React UI + Python notebook/CLI)
+  url: https://github.com/twelvedevs/autofill-examples
+
+servers:
+  - url: https://autofill.p.rapidapi.com
+    description: |
+      RapidAPI gateway — use with `x-rapidapi-key` and `x-rapidapi-host` from the Endpoints tab.
+      Official examples call this host; see twelvedevs/autofill-examples.
+  - url: https://api.autofill.12devs.info/api
+    description: Direct production origin (no RapidAPI headers)
+
+security:
+  - RapidApiKey: []
+    RapidApiHost: []
+
+tags:
+  - name: Quick Start
+    description: |
+      Minimal integration path used by [autofill-examples](https://github.com/twelvedevs/autofill-examples):
+      `POST /upload` then `POST /recognize`. Allow up to **120 s** on recognize.
+  - name: System
+    description: Operational endpoints (service liveness).
+  - name: Files
+    description: Upload a file to the server; then use `filePath` from the response.
+  - name: OCR
+    description: Document recognition and template field extraction (JSON or multipart).
+  - name: CMR
+    description: |
+      CMR (consignment note) extraction via a dedicated Gemini pipeline — structured `cmr` object
+      (shipment, parties, goods received date, consignee stamp/signature, receipt confirmation).
+  - name: Table
+    description: Extract the main line-items table (grid + `line_items`).
+  - name: Health
+    description: Service and dependency health (MongoDB, Ollama, etc.).
+  - name: Assist
+    description: Auxiliary LLM calls (e.g. field explanation from OCR context).
+  - name: Metrics
+    description: Prometheus metrics and internal reports (auth may vary by deployment).
+  - name: Pages
+    description: Render a PDF/document page image for UI preview.
+  - name: History
+    description: Recognition run history in MongoDB (pagination and delete).
+  - name: Templates
+    description: Field-template CRUD for UI and reuse.
+
+paths:
+  /ping:
+    get:
+      summary: Liveness endpoint
+      description: |
+        Minimal liveness check: the process is up and responds over HTTP. Does not touch OCR/LLM.
+        Suitable for load balancers and non-Kubernetes health checks.
+      tags:
+        - System
+      security: []
+      responses:
+        '200':
+          description: Server is up; response body is a short confirmation message.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Human-readable status text.
+                    example: Server is alive
+
+  /upload:
+    post:
+      summary: Upload a file
+      description: |
+        Accepts one file as `multipart/form-data` (field **`file`**).
+        Returns `filePath` for `POST /recognize`, `POST /cmr`, or `POST /extract-table`.
+        Supported types depend on server config (usually PDF, PNG, JPG/JPEG); max size is configured (often ~30 MB).
+
+        **Quick start (step 1 of 2):** used by [react-tryit](https://github.com/twelvedevs/autofill-examples/tree/main/examples/react-tryit)
+        and [python-quickstart](https://github.com/twelvedevs/autofill-examples/tree/main/examples/python-quickstart).
+        On RapidAPI Hub send `x-rapidapi-key` and `x-rapidapi-host` with the file.
+      tags:
+        - Quick Start
+        - Files
+      requestBody:
+        description: Request body is the file in field `file` only.
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Document for later recognition (form field name must be `file`).
+      responses:
+        '200':
+          description: File stored; JSON includes path for follow-up requests and MIME type.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+              examples:
+                success:
+                  value:
+                    filePath: "1713123456-invoice.pdf"
+                    mime: "application/pdf"
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '413':
+          description: File exceeds the server upload size limit.
+        '429':
+          description: Too many requests (rate limit).
+
+  /recognize:
+    post:
+      summary: Recognize a document
+      description: |
+        Full pipeline for a file already on the server: OCR + field extraction from `fields`.
+        File path is `filePath` from `POST /upload` (or a name the server can resolve under uploads).
+
+        `extractTable: true` adds a table block (`table`, `line_items`) alongside fields.
+        `mode: auto` lets the server expand fields; `manual` uses only the provided list.
+
+        **Quick start (step 2 of 2):** after `POST /upload`, send JSON e.g. `{ "filePath": "…", "mode": "auto" }`.
+        Examples default to **auto** for the fastest first result; **manual** with preset field names (BOL, Commercial Invoice, POD, Shipping Label) is documented in the examples repo.
+        Typical latency is tens of seconds — use a **120 s** client timeout (see autofill-examples).
+      tags:
+        - Quick Start
+        - OCR
+      requestBody:
+        required: true
+        description: JSON with file path and recognition options.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecognizeRequest'
+      responses:
+        '200':
+          description: Success — fields with confidence, OCR text/blocks, metadata (language, cache, timings, etc.).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecognizeResponse'
+              examples:
+                success:
+                  value:
+                    status: "success"
+                    data:
+                      invoiceNumber: "INV-2024-001"
+                      date: "2024-04-14"
+                      amount: "1500.00"
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          description: Too many requests (rate limit).
+
+  /recognize/file:
+    post:
+      summary: Upload + recognize in one request
+      description: |
+        Single request: upload file + recognize without a prior `POST /upload`.
+        Field **`file`** is the document binary. Pass `fields` as a JSON string or as repeated string values
+        depending on your backend multipart parser.
+
+        Useful when clients do not persist `filePath` (mobile apps, Postman).
+        The [autofill-examples](https://github.com/twelvedevs/autofill-examples) quick starts use the two-step
+        `POST /upload` → `POST /recognize` flow instead (easier to debug and matches Hub tutorials).
+      tags:
+        - OCR
+      requestBody:
+        required: true
+        description: Multipart with required `file` and optional form fields (language, mode, cache, fields).
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Document (PDF / image); form field name `file`.
+                fields:
+                  description: JSON string array or repeated form value
+                  oneOf:
+                    - type: string
+                      example: '{"fields": ["invoiceNumber","amount","date"]}'
+                    - type: array
+                      items:
+                        type: string
+                language:
+                  type: string
+                  enum: [rus, eng, rus+eng, deu, fra, spa, auto]
+                  default: auto
+                  description: OCR language hint; `auto` means auto-detect / mixed.
+                mode:
+                  type: string
+                  enum: [manual, auto]
+                  default: auto
+                  description: "`manual` extracts only listed fields; `auto` lets the server expand the set."
+                useCache:
+                  type: boolean
+                  default: true
+                  description: Use cached OCR when repeating the same file/language.
+            encoding:
+              file:
+                contentType: application/pdf, image/png, image/jpeg, image/jpg
+      responses:
+        '200':
+          description: Same JSON shape as `POST /recognize`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecognizeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '413':
+          description: File too large.
+        '429':
+          description: Too many requests (rate limit).
+
+  /cmr:
+    post:
+      summary: Extract CMR consignment note (JSON)
+      description: |
+        **CMR-specific pipeline** for a file already on the server (`filePath` from `POST /upload`).
+        The document is analyzed by a dedicated Gemini model (no server OCR step); the response
+        contains a structured **`cmr`** object (shipment number, sender/consignee, goods received date,
+        consignee stamp/signature, receipt confirmation, confidence scores).
+
+        Typical flow: `POST /upload` → `POST /cmr` with `{ "filePath": "…" }`.
+        Allow up to **120 s** (same timeout as `/recognize`).
+
+        On success, `fields` is always an empty object `{}` (reserved); use **`cmr`** for extracted data.
+        If the model call fails partially, check `cmr_error` and `meta.cmr_error`.
+      tags:
+        - CMR
+      requestBody:
+        required: true
+        description: JSON with `filePath` of an uploaded CMR scan (PDF or image).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CmrRecognizeRequest'
+      responses:
+        '200':
+          description: Structured CMR extraction in `cmr`; `ocr.skipped` is true for this flow.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CmrRecognizeResponse'
+              examples:
+                success:
+                  value:
+                    fields: {}
+                    cmr:
+                      document_type: CMR
+                      shipment_number:
+                        value: "12345678"
+                        confidence: 0.92
+                        location_hint: "top-right"
+                      receipt_confirmation:
+                        present: true
+                        confidence: 0.85
+                    ocr:
+                      skipped: true
+                      message: "Server-side OCR was not used; the file was sent to Gemini as PDF/image per CMR flow."
+                    meta:
+                      flow: cmr_direct_gemini
+                      processingTime: 45000
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          description: Too many requests (rate limit).
+        '500':
+          description: CMR pipeline or upstream model error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cmr/file:
+    post:
+      summary: Upload + CMR extraction in one request
+      description: |
+        Single request: upload a CMR scan and run the CMR pipeline without a prior `POST /upload`.
+        Multipart field **`file`** — PDF, PNG, or JPEG (max ~30 MB).
+
+        Same response shape as `POST /cmr`. Use the two-step upload flow when you need to reuse `filePath`
+        or debug upload vs extraction separately.
+      tags:
+        - CMR
+      requestBody:
+        required: true
+        description: Multipart with binary field `file` only.
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: CMR document (PDF / PNG / JPEG); form field name `file`.
+            encoding:
+              file:
+                contentType: application/pdf, image/png, image/jpeg, image/jpg
+      responses:
+        '200':
+          description: Same JSON shape as `POST /cmr`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CmrRecognizeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '413':
+          description: File too large.
+        '429':
+          description: Too many requests (rate limit).
+        '500':
+          description: CMR pipeline or upstream model error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /extract-table:
+    post:
+      summary: OCR + table extraction (columns/rows)
+      description: |
+        JSON body with `filePath` of a file **already on the server** (e.g. after `POST /upload`).
+        To send a file from the client in one step, use **`POST /extract-table/file`** with `multipart/form-data`.
+      tags:
+        - Table
+      requestBody:
+        required: true
+        description: JSON with `filePath` of a file already on the server.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtractTableRequest'
+      responses:
+        '200':
+          description: Table in `table`, structured rows in `line_items`, full OCR in `ocr`, operational fields in `meta`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractTableResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          description: Too many requests (rate limit)
+
+  /extract-table/file:
+    post:
+      summary: Upload + table extraction in one request
+      description: |
+        **User file upload:** send the document as `multipart/form-data` field `file` (PDF, PNG, JPG/JPEG).
+        The server runs OCR and returns `table` + structured `line_items` in JSON.
+        Optional fields `language` and `useCache` are sent as form fields (same as backend multer).
+      tags:
+        - Table
+      requestBody:
+        required: true
+        description: Multipart with binary field `file` and optional `language`, `useCache`.
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ExtractTableMultipartRequest'
+            encoding:
+              file:
+                contentType: application/pdf, image/png, image/jpeg, image/jpg
+      responses:
+        '200':
+          description: Same as `POST /extract-table` — table, `line_items`, OCR, and meta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractTableResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '413':
+          description: File too large (max ~30 MB per server configuration)
+        '429':
+          description: Too many requests (rate limit)
+
+  /health:
+    get:
+      summary: Overall service health
+      description: |
+        Aggregated app status (DB, external services, etc. — depends on deployment).
+        Use for monitoring; does not run heavy OCR.
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Healthy or partially degraded but still HTTP 200 — inspect JSON body.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '503':
+          description: Service unavailable or a critical dependency is down — do not rely on the API until recovered.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /health/mongodb:
+    get:
+      summary: MongoDB health
+      description: Checks MongoDB connectivity (templates, history, etc.). Some API features fail without a working DB.
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: MongoDB reachable; body includes response time and message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+              examples:
+                success:
+                  value:
+                    status: "healthy"
+                    service: "mongodb"
+                    responseTime: "15ms"
+                    timestamp: "2024-04-14T10:30:00Z"
+                    message: "MongoDB connection successful"
+        '503':
+          description: MongoDB not responding — DB-backed operations will error until fixed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+              examples:
+                unhealthy:
+                  value:
+                    status: "unhealthy"
+                    service: "mongodb"
+                    responseTime: "5000ms"
+                    error: "Connection refused"
+
+  /health/ollama:
+    get:
+      summary: Ollama health
+      description: Checks local (or configured) Ollama for LLM calls when that provider is enabled.
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Ollama is up; LLM calls to this provider can proceed.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '503':
+          description: Ollama unavailable — switch LLM provider or restore the service.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /assist/describe-field:
+    post:
+      summary: Describe a field with LLM
+      description: |
+        Given a field name and OCR snippet (`context`), returns a short text hint for UI users
+        about what to expect in that field (does not extract a value from the document).
+      tags:
+        - Assist
+      requestBody:
+        required: true
+        description: JSON with field name and optional context (document text or excerpt).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DescribeFieldRequest'
+      responses:
+        '200':
+          description: "`description` holds explanatory text in the model’s output language / server locale."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DescribeFieldResponse'
+              examples:
+                success:
+                  value:
+                    description: "Unique invoice number issued by the seller"
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          description: Too many requests (rate limit).
+
+  /metrics:
+    get:
+      summary: Get computed metrics
+      description: Prometheus exposition text (counters, latency histograms, etc.) for Grafana/Prometheus scrape.
+      tags:
+        - Metrics
+      security: []
+      responses:
+        '200':
+          description: Response body is `text/plain` Prometheus metric lines.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          description: Internal error while collecting or serializing metrics.
+
+  /metrics/raw:
+    get:
+      summary: Get raw metrics
+      description: JSON with raw internal counters/snapshots (debugging; format may change).
+      tags:
+        - Metrics
+      security: []
+      responses:
+        '200':
+          description: Object with arbitrary keys — backend implementation detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '500':
+          description: Error reading raw metrics.
+
+  /metrics/reset:
+    post:
+      summary: Reset internal metrics
+      description: Clears in-memory counters on this instance (testing). In a cluster, only the current process is affected.
+      tags:
+        - Metrics
+      security: []
+      responses:
+        '200':
+          description: Reset done; body is an arbitrary confirmation JSON.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '500':
+          description: Failed to reset metrics.
+
+  /metrics/health:
+    get:
+      summary: Metrics-based health
+      description: Simplified health from internal thresholds (errors, latency, etc.) — not a replacement for `/health`.
+      tags:
+        - Metrics
+      security: []
+      responses:
+        '200':
+          description: Backend rules consider the service healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '503':
+          description: Degraded by metrics (e.g. high error rate) — see response body.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /pages/{filePath}/{pageNumber}:
+    get:
+      summary: Get a PDF page image
+      description: |
+        Returns a PNG render of one page for a document the server already has at `filePath`.
+        **Important:** path `filePath` must be **URL-encoded** (slashes and spaces encoded), otherwise routing breaks.
+
+        Typical use: UI preview after upload or recognition.
+      tags:
+        - Pages
+      security: []
+      parameters:
+        - name: filePath
+          in: path
+          required: true
+          description: |
+            File name or relative path on the server, **URL-encoded** (e.g. `1713123456-doc.pdf` or full path after encoding).
+          schema:
+            type: string
+            example: "sample.png"
+        - name: pageNumber
+          in: path
+          required: true
+          description: 1-based page number (use `1` for a single-page image).
+          schema:
+            type: integer
+            example: 1
+      responses:
+        '200':
+          description: Binary PNG image of the requested page.
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '404':
+          description: File or page not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /history:
+    get:
+      summary: List recognition history (paginated)
+      description: |
+        MongoDB log entries: who/when ran recognition, file path, status, duration.
+        Pagination via `limit` and `offset` (max `limit` per schema — often up to 100).
+      tags:
+        - History
+      parameters:
+        - name: limit
+          in: query
+          description: Number of records (default 50)
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          description: Offset from the start (default 0)
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: List of history entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoryListResponse'
+              examples:
+                success:
+                  value:
+                    logs:
+                      - _id: "507f1f77bcf86cd799439011"
+                        timestamp: "2024-04-14T10:30:00Z"
+                        action: "recognition"
+                        filePath: "1713123456-invoice.pdf"
+                        status: "success"
+                    total: 150
+                    limit: 50
+                    offset: 0
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          description: Too many requests (rate limit).
+
+  /history/{id}:
+    get:
+      summary: Get a history entry by ID
+      description: One log row by MongoDB `_id` (ObjectId string).
+      tags:
+        - History
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Entry ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: History entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoryLogEntry'
+              examples:
+                success:
+                  value:
+                    _id: "507f1f77bcf86cd799439011"
+                    timestamp: "2024-04-14T10:30:00Z"
+                    action: "recognition"
+                    filePath: "1713123456-invoice.pdf"
+                    status: "success"
+                    duration: 2500
+        '404':
+          description: Entry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+    delete:
+      summary: Delete a history entry
+      description: Deletes the history entry by id. Irreversible on the API side.
+      tags:
+        - History
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Entry ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Entry deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Log entry deleted successfully"
+        '404':
+          description: Entry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /templates:
+    get:
+      summary: List all templates
+      description: Returns all saved field templates (name, description, typed field list) for UI selection.
+      tags:
+        - Templates
+      responses:
+        '200':
+          description: Array of templates in `templates`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplatesListResponse'
+              examples:
+                success:
+                  value:
+                    templates:
+                      - _id: "507f1f77bcf86cd799439012"
+                        name: "Invoice"
+                        description: "Invoice field template"
+                        fields:
+                          - name: "invoiceNumber"
+                            type: "string"
+                          - name: "amount"
+                            type: "number"
+                      - _id: "507f1f77bcf86cd799439013"
+                        name: "Receipt"
+                        description: "Receipt field template"
+                        fields:
+                          - name: "receiptNumber"
+                            type: "string"
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+    post:
+      summary: Create a template
+      description: Creates a new template with a unique name and field set (`CreateTemplateRequest`).
+      tags:
+        - Templates
+      requestBody:
+        required: true
+        description: JSON with template name, optional description, and fields array.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTemplateRequest'
+      responses:
+        '200':
+          description: Full created template as stored in the DB, including `_id`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+              examples:
+                success:
+                  value:
+                    _id: "507f1f77bcf86cd799439014"
+                    name: "Invoice"
+                    description: "Invoice field template"
+                    fields:
+                      - name: "invoiceNumber"
+                        type: "string"
+                      - name: "amount"
+                        type: "number"
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /templates/{id}:
+    get:
+      summary: Get a template by ID
+      description: Returns one template by MongoDB id for edit or display.
+      tags:
+        - Templates
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Template ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Template
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+              examples:
+                success:
+                  value:
+                    _id: "507f1f77bcf86cd799439014"
+                    name: "Invoice"
+                    description: "Invoice field template"
+                    fields:
+                      - name: "invoiceNumber"
+                        type: "string"
+                      - name: "amount"
+                        type: "number"
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+    put:
+      summary: Update a template
+      description: Partial or full update of name, description, and field list by id.
+      tags:
+        - Templates
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Template ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: JSON with fields to update (merge/replace semantics depend on backend).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTemplateRequest'
+      responses:
+        '200':
+          description: Template state after update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+              examples:
+                success:
+                  value:
+                    _id: "507f1f77bcf86cd799439014"
+                    name: "Invoice v2"
+                    description: "Updated invoice field template"
+                    fields:
+                      - name: "invoiceNumber"
+                        type: "string"
+                      - name: "amount"
+                        type: "number"
+                      - name: "currency"
+                        type: "string"
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+    delete:
+      summary: Delete a template
+      description: Deletes the template by id. UI clients should stop showing the removed template.
+      tags:
+        - Templates
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Template ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Template deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Template deleted successfully"
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+components:
+  securitySchemes:
+    RapidApiKey:
+      type: apiKey
+      in: header
+      name: x-rapidapi-key
+      description: |
+        Required by the RapidAPI gateway (subscription key from the Hub **Endpoints** tab).
+        Copy into `VITE_RAPIDAPI_KEY` (React example) or `RAPIDAPI_KEY` (Python example) in
+        [twelvedevs/autofill-examples](https://github.com/twelvedevs/autofill-examples).
+        The origin API does not validate this header; RapidAPI checks it at the edge.
+        Optional client alias: `x-user-rapidapi-key` (same subscription key).
+    RapidApiHost:
+      type: apiKey
+      in: header
+      name: x-rapidapi-host
+      description: |
+        Required by the RapidAPI gateway — listing host from the Hub (e.g. `autofill.p.rapidapi.com`).
+        Copy into `VITE_RAPIDAPI_HOST` or `RAPIDAPI_HOST` in the examples repo.
+
+  responses:
+    UnauthorizedError:
+      description: |
+        HTTP 401 — access denied (legacy or reserved error body on the origin).
+        On RapidAPI Hub, subscription auth (`X-RapidAPI-*`) is enforced separately; subscription failures may return a Rapid gateway response instead of this body.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              en: "Unauthorized."
+              ru: "Access denied (localized in production)."
+    
+    BadRequestError:
+      description: |
+        HTTP 400 — invalid parameters, missing required fields, wrong file type,
+        or file not found for the given `filePath`. Human-readable text is in `error` (may be localized).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              en: "Invalid request"
+              ru: "Bad request (localized in production)."
+
+  schemas:
+    ErrorResponse:
+      description: Standard API error body — human-readable message; when `error` is an object, EN/RU (and others) may appear.
+      type: object
+      properties:
+        error:
+          description: String or object with localized fields (`message`, `en`, `ru`, etc. depending on endpoint).
+          oneOf:
+            - type: string
+            - type: object
+              properties:
+                en:
+                  type: string
+                  description: English message (compatibility).
+                ru:
+                  type: string
+                  description: Russian message (compatibility; production payloads may differ).
+
+    UploadResponse:
+      description: Response after a successful file upload to the server.
+      type: object
+      properties:
+        filePath:
+          type: string
+          description: Relative file name/path on the server — pass to `recognize` / `extract-table`.
+          example: "1713123456-invoice.pdf"
+        mime:
+          type: string
+          description: MIME type of the accepted file as detected by the server.
+          example: "application/pdf"
+
+    RecognizeRequest:
+      description: Recognition request for a file already known to the server by path.
+      type: object
+      required: [filePath]
+      properties:
+        filePath:
+          type: string
+          description: Path from `POST /upload` or a filename in the uploads store.
+          example: "sample.png"
+        fields:
+          type: array
+          description: Field names to extract (keys in the response `fields` map).
+          items:
+            type: string
+          example: ["invoiceNumber", "amount", "date"]
+        language:
+          type: string
+          description: OCR / document language hint; `auto` lets the engine decide.
+          enum: [rus, eng, rus+eng, deu, fra, spa, auto]
+          default: auto
+        useCache:
+          type: boolean
+          description: Use OCR cache on repeat requests.
+          default: true
+        mode:
+          type: string
+          description: Field selection mode — only listed fields vs auto-expansion.
+          enum: [manual, auto]
+          default: auto
+        extractTable:
+          type: boolean
+          description: When `true`, response also includes `table` and `line_items`.
+          default: false
+
+    CmrRecognizeRequest:
+      description: CMR extraction for a file already stored on the server.
+      type: object
+      required: [filePath]
+      properties:
+        filePath:
+          type: string
+          description: Path from `POST /upload` or a filename resolvable under server uploads.
+          example: "1713123456-cmr-scan.pdf"
+        language:
+          type: string
+          description: Reserved OCR/language hint (CMR flow sends the file directly to Gemini; default `rus+eng`).
+          enum: [rus, eng, rus+eng, deu, fra, spa, auto]
+          default: rus+eng
+        useCache:
+          type: boolean
+          description: Reserved for future CMR caching; currently accepted for API symmetry.
+          default: true
+
+    CmrRecognizeResponse:
+      description: |
+        CMR pipeline result. **`cmr`** holds the model JSON (document_type, shipment_number, sender,
+        consignee, goods_received_date, consignee_stamp, consignee_signature, receipt_confirmation, notes).
+        **`fields`** is always `{}` on this route. **`ocr.skipped`** is true — no server OCR text blocks.
+      type: object
+      properties:
+        fields:
+          type: object
+          description: Always empty on CMR routes; use `cmr` instead.
+          additionalProperties: false
+          example: {}
+        cmr:
+          description: Structured CMR extraction from Gemini (schema is model-defined; see backend CMR prompt).
+          nullable: true
+          additionalProperties: true
+          example:
+            document_type: CMR
+            shipment_number:
+              value: "12345678"
+              confidence: 0.92
+            receipt_confirmation:
+              present: true
+              confidence: 0.85
+        cmr_error:
+          type: string
+          description: Present when the CMR model call failed but HTTP 200 was still returned with partial payload.
+        ocr:
+          type: object
+          description: Placeholder — server OCR is skipped; `skipped` is true with an explanatory message.
+          properties:
+            skipped:
+              type: boolean
+            message:
+              type: string
+        meta:
+          type: object
+          description: Timings, `flow` (`cmr_direct_gemini`), file name/size, optional `cmr_error`.
+          additionalProperties: true
+
+    RecognizeResponse:
+      description: Recognition result — extracted fields, optional table, raw OCR, and metadata.
+      type: object
+      properties:
+        fields:
+          type: object
+          description: Map of field → value, confidence, candidates, and per-field `meta` (shape is backend-specific).
+          additionalProperties: true
+        table:
+          description: Line-items grid (headers + rows); empty if table was not requested or not found.
+          allOf:
+            - $ref: '#/components/schemas/TableData'
+        line_items:
+          type: array
+          description: >-
+            Structured rows derived from table.columns/table.rows via header synonym matching (no extra LLM call).
+            See meta.structured_method.
+          items:
+            $ref: '#/components/schemas/TableLineItem'
+        ocr:
+          type: object
+          description: OCR payload — full text, blocks with geometry, average confidence, page count, source dimensions for UI.
+          properties:
+            text:
+              type: string
+              description: Concatenated document text (for LLM and preview).
+            blocks:
+              type: array
+              description: Text blocks with geometry (for UI highlights).
+              items:
+                type: object
+                additionalProperties: true
+            avgConfidence:
+              type: number
+              description: Average OCR confidence per page/document (0–1; meaning depends on engine).
+            pageCount:
+              type: integer
+              description: Page count (PDF ≥ 1).
+            sourceImgWidth:
+              type: number
+              description: Source image / first page width for coordinate normalization in UI.
+            sourceImgHeight:
+              type: number
+              description: Source image / first page height.
+        meta:
+          type: object
+          description: Operational info — timing, file path, `extractTable`, rate limits, table column roles, etc.
+          additionalProperties: true
+
+    ExtractTableRequest:
+      description: Table-only extraction for a file already on the server.
+      type: object
+      required: [filePath]
+      properties:
+        filePath:
+          type: string
+          description: Path returned by `POST /upload` or a filename resolvable on the server (e.g. under uploads).
+          example: "sample.png"
+        language:
+          type: string
+          description: OCR language hint.
+          enum: [rus, eng, rus+eng, deu, fra, spa, auto]
+          default: auto
+        useCache:
+          type: boolean
+          description: Reuse cached OCR when repeating the request.
+          default: true
+
+    ExtractTableMultipartRequest:
+      description: |
+        `multipart/form-data` body for **`POST /extract-table/file`**: attach the document in field `file`,
+        the server stores it, runs OCR, and returns `table` + `line_items`. `language` and `useCache` are normal form fields.
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: Document file (PDF, PNG, JPG/JPEG). Field name must be `file` (matches backend `upload.single('file')`).
+        language:
+          type: string
+          enum: [rus, eng, rus+eng, deu, fra, spa, auto]
+          default: auto
+          description: OCR / text language hint (form field).
+        useCache:
+          type: boolean
+          default: true
+          description: Whether to reuse cached OCR when available (form field).
+
+    TableData:
+      description: Table as a header array and row arrays of equal length (cells are string, number, or null).
+      type: object
+      properties:
+        columns:
+          type: array
+          description: Column labels left-to-right (as returned by LLM / parser).
+          items:
+            type: string
+        rows:
+          type: array
+          description: Each row is an array of cell values in `columns` order.
+          items:
+            type: array
+            items:
+              nullable: true
+              anyOf:
+                - type: string
+                - type: number
+
+    TableLineItem:
+      type: object
+      description: |
+        One line-item row in canonical form: fields mapped from table headers (heuristics / synonyms).
+        `issues` may be empty when there are no row-level warnings.
+      properties:
+        position:
+          type: integer
+          description: Line number in the table, value from an index column if present, otherwise row order.
+        description:
+          type: string
+          nullable: true
+          description: Product/service name or merged textual description for the row.
+        sku:
+          type: string
+          nullable: true
+          description: SKU / product code when a matching column exists.
+        quantity:
+          type: number
+          nullable: true
+          description: Quantity as a number.
+        unit:
+          type: string
+          nullable: true
+          description: Unit of measure (e.g. pcs, kg).
+        unit_price:
+          type: number
+          nullable: true
+          description: Price per unit (currency may live in another table column).
+        line_total:
+          type: number
+          nullable: true
+          description: Line amount / extended price.
+        tax_rate:
+          type: number
+          nullable: true
+          description: Tax rate in percent after normalization (e.g. 0.2 may become 20).
+        tax_amount:
+          type: number
+          nullable: true
+          description: Tax amount for the row when a separate column exists.
+        raw:
+          type: object
+          description: Original grid row without data loss (debugging / custom mapping).
+          properties:
+            cells:
+              type: array
+              description: Cell values in table column order.
+              items:
+                nullable: true
+                anyOf:
+                  - type: string
+                  - type: number
+        issues:
+          type: array
+          description: Quality flags (e.g. weak_row, missing_or_short_description, quantity_unit_price_total_mismatch).
+          items:
+            type: string
+
+    ExtractTableResponse:
+      description: Table extraction response — grid, canonical `line_items`, OCR, and meta (timing, LLM provider, structuring warnings).
+      type: object
+      properties:
+        scenario:
+          type: string
+          description: Scenario name for clients (fixed `extract_table`).
+          example: extract_table
+        table:
+          description: Raw table as columns × rows.
+          allOf:
+            - $ref: '#/components/schemas/TableData'
+        line_items:
+          type: array
+          description: Rows after header post-processing (see `meta.column_roles`, `meta.structured_warnings`).
+          items:
+            $ref: '#/components/schemas/TableLineItem'
+        ocr:
+          type: object
+          description: Full-document OCR (text, blocks, confidence, pages).
+          properties:
+            text:
+              type: string
+              description: Full recognized text.
+            blocks:
+              type: array
+              description: Blocks with coordinates for UI.
+              items:
+                type: object
+                additionalProperties: true
+            avgConfidence:
+              type: number
+              description: Average OCR confidence.
+            pageCount:
+              type: integer
+              description: Page count.
+        meta:
+          type: object
+          description: Meta — file path, duration, provider, `column_roles`, `structured_warnings`, rate limits, etc.
+          additionalProperties: true
+
+    HealthCheckResponse:
+      description: Unified dependency health payload (MongoDB, etc.).
+      type: object
+      properties:
+        status:
+          type: string
+          description: Aggregated status — `healthy` or `unhealthy`.
+          enum: [healthy, unhealthy]
+        service:
+          type: string
+          description: Checked service name (e.g. `mongodb`).
+        responseTime:
+          type: string
+          description: Check round-trip as a display string (e.g. `15ms`).
+        timestamp:
+          type: string
+          format: date-time
+          description: Server-side check timestamp.
+        message:
+          type: string
+          description: Short human-readable summary.
+        error:
+          type: string
+          description: Error text when `unhealthy`.
+
+    DescribeFieldRequest:
+      description: Ask the LLM for a human-readable field description from document context.
+      type: object
+      required: [field]
+      properties:
+        field:
+          type: string
+          description: Field name from the template (key).
+          example: "invoiceNumber"
+        context:
+          type: string
+          description: OCR excerpt from the document, or empty if not needed.
+          example: "Invoice document"
+
+    DescribeFieldResponse:
+      description: Response with a single textual field description.
+      type: object
+      properties:
+        description:
+          type: string
+          description: Explanatory text for UI or docs.
+          example: "Unique invoice number issued by the seller"
+
+    HistoryLogEntry:
+      description: One recognition history row in MongoDB.
+      type: object
+      properties:
+        _id:
+          type: string
+          description: MongoDB document id.
+          example: "507f1f77bcf86cd799439011"
+        timestamp:
+          type: string
+          format: date-time
+          description: Event time on the server.
+        action:
+          type: string
+          description: Operation type (recognition, upload, etc.).
+          enum: [recognition, upload, template_match]
+        filePath:
+          type: string
+          description: File path associated with the entry.
+        status:
+          type: string
+          description: Operation outcome.
+          enum: [success, failed, pending]
+        duration:
+          type: integer
+          description: Processing time in milliseconds.
+        error:
+          type: string
+          description: Error message when `failed`.
+
+    HistoryListResponse:
+      description: Paginated history list.
+      type: object
+      properties:
+        logs:
+          type: array
+          description: Page of entries (length ≤ `limit`).
+          items:
+            $ref: '#/components/schemas/HistoryLogEntry'
+        total:
+          type: integer
+          description: Total rows in the collection (for paging).
+          example: 150
+        limit:
+          type: integer
+          description: Requested page size.
+          example: 50
+        offset:
+          type: integer
+          description: Offset from the start of the query.
+          example: 0
+
+    TemplateField:
+      description: One field definition inside a template.
+      type: object
+      properties:
+        name:
+          type: string
+          description: Field key in the result JSON / in the `fields` request list.
+          example: "invoiceNumber"
+        type:
+          type: string
+          description: Type hint for UI and validation.
+          enum: [text, number, date, currency]
+          default: text
+        required:
+          type: boolean
+          description: Whether the field is required in the UI flow.
+          default: false
+        description:
+          type: string
+          description: Label or hint for template users.
+
+    Template:
+      description: A reusable field set for recognition.
+      type: object
+      properties:
+        _id:
+          type: string
+          description: MongoDB template id.
+          example: "507f1f77bcf86cd799439014"
+        name:
+          type: string
+          description: Short unique template name.
+          example: "Invoice"
+        description:
+          type: string
+          description: Longer description of what the template is for.
+          example: "Invoice field template"
+        fields:
+          type: array
+          description: Template fields with types.
+          items:
+            $ref: '#/components/schemas/TemplateField'
+        createdAt:
+          type: string
+          format: date-time
+          description: Record creation time.
+        updatedAt:
+          type: string
+          format: date-time
+          description: Last update time.
+
+    CreateTemplateRequest:
+      description: Body for creating a new template.
+      type: object
+      required: [name, fields]
+      properties:
+        name:
+          type: string
+          description: Name of the new template.
+          example: "Invoice"
+        description:
+          type: string
+          description: Optional longer description.
+          example: "Invoice field template"
+        fields:
+          type: array
+          description: Non-empty list of template fields.
+          items:
+            $ref: '#/components/schemas/TemplateField'
+
+    UpdateTemplateRequest:
+      description: Partial template update — send only fields you want to change.
+      type: object
+      properties:
+        name:
+          type: string
+          description: New template name.
+        description:
+          type: string
+          description: New description.
+        fields:
+          type: array
+          description: Full replacement of the field list when provided (semantics depend on API).
+          items:
+            $ref: '#/components/schemas/TemplateField'
+
+    TemplatesListResponse:
+      description: Wrapper with the full template list.
+      type: object
+      properties:
+        templates:
+          type: array
+          description: All templates available for UI selection.
+          items:
+            $ref: '#/components/schemas/Template'
