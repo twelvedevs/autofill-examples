@@ -42,7 +42,7 @@ export default function ResultsPanel({ result, error }: Props) {
 
   if (error) {
     return (
-      <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+      <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
         {error}
       </div>
     );
@@ -50,24 +50,30 @@ export default function ResultsPanel({ result, error }: Props) {
 
   if (!result) {
     return (
-      <p className="text-sm text-slate-500">Upload a file and click Extract to see results.</p>
+      <div className="card-panel flex h-40 items-center justify-center">
+        <p className="text-sm text-gray-500">Upload a file and click Extract Data to see results.</p>
+      </div>
     );
   }
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2">
-        <div className="flex gap-2">
+    <div className="card-panel flex flex-col overflow-hidden">
+      <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2">
+        <div className="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 text-xs">
           <button
             type="button"
-            className={`rounded px-3 py-1 text-sm ${tab === "table" ? "bg-indigo-100 text-indigo-800" : "text-slate-600"}`}
+            className={`rounded-md px-3 py-1.5 font-semibold transition-colors ${
+              tab === "table" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"
+            }`}
             onClick={() => setTab("table")}
           >
             Table
           </button>
           <button
             type="button"
-            className={`rounded px-3 py-1 text-sm ${tab === "json" ? "bg-indigo-100 text-indigo-800" : "text-slate-600"}`}
+            className={`rounded-md px-3 py-1.5 font-semibold transition-colors ${
+              tab === "json" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"
+            }`}
             onClick={() => setTab("json")}
           >
             JSON
@@ -75,14 +81,14 @@ export default function ResultsPanel({ result, error }: Props) {
         </div>
         <button
           type="button"
-          className="text-sm text-indigo-600 hover:underline"
+          className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:border-gray-300 hover:bg-gray-50"
           onClick={copyJson}
         >
           Copy JSON
         </button>
       </div>
       {result.meta && (
-        <div className="border-b border-slate-100 px-4 py-2 text-xs text-slate-500">
+        <div className="border-b border-gray-100 bg-gradient-to-r from-red-50/80 to-white px-4 py-2 text-xs text-gray-600">
           {result.meta.processingTime != null && (
             <span className="mr-4">processing: {result.meta.processingTime} ms</span>
           )}
@@ -95,8 +101,8 @@ export default function ResultsPanel({ result, error }: Props) {
       {tab === "table" ? (
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-50 text-left text-slate-600">
-              <tr>
+            <thead>
+              <tr className="border-b border-gray-200 bg-gray-100 text-left text-gray-600">
                 <th className="px-4 py-2 font-medium">Field</th>
                 <th className="px-4 py-2 font-medium">Value</th>
                 <th className="px-4 py-2 font-medium">Confidence</th>
@@ -105,16 +111,24 @@ export default function ResultsPanel({ result, error }: Props) {
             <tbody>
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={3} className="px-4 py-6 text-slate-500">
+                  <td colSpan={3} className="px-4 py-6 text-gray-500">
                     No fields returned (try auto mode or another preset).
                   </td>
                 </tr>
               ) : (
                 rows.map((r) => (
-                  <tr key={r.field} className="border-t border-slate-100">
-                    <td className="px-4 py-2 font-mono text-xs">{r.field}</td>
-                    <td className="px-4 py-2">{r.value || "—"}</td>
-                    <td className="px-4 py-2">{r.confidence}</td>
+                  <tr key={r.field} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-xs font-medium text-gray-800">{r.field}</td>
+                    <td className="px-4 py-2 text-gray-900">{r.value || "—"}</td>
+                    <td className="px-4 py-2">
+                      {r.confidence !== "—" ? (
+                        <span className="inline-flex items-center rounded-md border border-amber-100/80 bg-amber-50 px-2 py-0.5 font-mono text-xs font-semibold text-amber-900">
+                          {r.confidence}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                   </tr>
                 ))
               )}
@@ -122,9 +136,11 @@ export default function ResultsPanel({ result, error }: Props) {
           </table>
         </div>
       ) : (
-        <pre className="max-h-96 overflow-auto p-4 text-xs text-slate-800">
-          {JSON.stringify(result, null, 2)}
-        </pre>
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900 p-4 m-3 shadow-inner">
+          <pre className="max-h-96 overflow-auto text-xs leading-relaxed text-slate-100 whitespace-pre-wrap">
+            {JSON.stringify(result, null, 2)}
+          </pre>
+        </div>
       )}
     </div>
   );

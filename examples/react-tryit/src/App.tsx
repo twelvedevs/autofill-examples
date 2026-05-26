@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { recognize, uploadFile } from "./api/autofillClient";
+import BrandHeader from "./components/BrandHeader";
 import FileDropzone from "./components/FileDropzone";
 import FieldListEditor from "./components/FieldListEditor";
 import RecognizeControls from "./components/RecognizeControls";
@@ -83,78 +84,55 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto max-w-3xl px-4 py-6">
-          <h1 className="text-2xl font-bold text-slate-900">AutoFill Try It</h1>
-          <p className="mt-1 text-sm text-slate-600">
-            RapidAPI quick start —{" "}
-            <a
-              className="text-indigo-600 hover:underline"
-              href="https://rapidapi.com/12devs-12devs-default/api/autofill"
-              target="_blank"
-              rel="noreferrer"
-            >
-              subscribe on Hub
-            </a>
-            {" · "}
-            <a
-              className="text-indigo-600 hover:underline"
-              href="https://github.com/twelvedevs/autofill-examples"
-              target="_blank"
-              rel="noreferrer"
-            >
-              examples repo
-            </a>
-          </p>
-        </div>
-      </header>
+    <div className="flex min-h-screen flex-col bg-gray-50">
+      <BrandHeader />
 
-      <main className="mx-auto max-w-3xl space-y-6 px-4 py-8">
-        <section>
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">
-            1. Upload
-          </h2>
-          <FileDropzone disabled={uploadState === "uploading"} onFile={handleUpload} />
-          {uploadState === "uploading" && (
-            <p className="mt-2 text-sm text-indigo-600">Uploading…</p>
-          )}
-          {filePath && (
-            <p className="mt-2 text-sm text-green-700">
-              Uploaded: <code className="rounded bg-green-50 px-1">{filePath}</code>
-            </p>
-          )}
-          {uploadError && <p className="mt-2 text-sm text-red-600">{uploadError}</p>}
-        </section>
+      <main className="mx-auto w-full max-w-3xl flex-1 space-y-6 px-4 py-6 sm:px-6 sm:py-8">
+          <section className="card-panel p-4 sm:p-5">
+            <h2 className="section-label mb-3">1. Upload document</h2>
+            <div className="relative">
+              <FileDropzone disabled={uploadState === "uploading"} onFile={handleUpload} />
+            </div>
+            {uploadState === "uploading" && (
+              <p className="mt-2 text-xs font-semibold text-amber-600">Uploading…</p>
+            )}
+            {filePath && (
+              <p className="mt-2 flex items-center gap-1 text-xs font-semibold text-green-600">
+                <span aria-hidden>✓</span> Ready:{" "}
+                <code className="rounded bg-green-50 px-1.5 py-0.5 font-mono text-green-800">
+                  {filePath}
+                </code>
+              </p>
+            )}
+            {uploadError && (
+              <p className="mt-2 text-sm text-red-600">{uploadError}</p>
+            )}
+          </section>
 
-        <section className="space-y-4">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
-            2. Configure
-          </h2>
-          <TemplatePresetSelect value={presetId} onChange={applyPreset} />
-          {mode === "manual" && (
-            <FieldListEditor fields={fields} onChange={setFields} />
-          )}
-          <RecognizeControls
-            mode={mode}
-            language={language}
-            filePath={filePath}
-            loading={loading}
-            onModeChange={(m) => {
-              setMode(m);
-              if (m === "auto") setPresetId(AUTO_PRESET_ID);
-            }}
-            onLanguageChange={setLanguage}
-            onExtract={handleExtract}
-          />
-        </section>
+          <section className="card-panel space-y-4 p-4 sm:p-5">
+            <h2 className="section-label">2. Configure extraction</h2>
+            <TemplatePresetSelect value={presetId} onChange={applyPreset} />
+            {mode === "manual" && (
+              <FieldListEditor fields={fields} onChange={setFields} />
+            )}
+            <RecognizeControls
+              mode={mode}
+              language={language}
+              filePath={filePath}
+              loading={loading}
+              onModeChange={(m) => {
+                setMode(m);
+                if (m === "auto") setPresetId(AUTO_PRESET_ID);
+              }}
+              onLanguageChange={setLanguage}
+              onExtract={handleExtract}
+            />
+          </section>
 
-        <section>
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">
-            3. Results
-          </h2>
-          <ResultsPanel result={result} error={extractError} />
-        </section>
+          <section>
+            <h2 className="section-label mb-3">3. Results</h2>
+            <ResultsPanel result={result} error={extractError} />
+          </section>
       </main>
     </div>
   );
